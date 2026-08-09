@@ -238,9 +238,9 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09j";
+const BUILD="2026-08-09m";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
-  recordSpeak:false,
+  recordSpeak:false,walkRepeat:1,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
   gsize:{blanks:1,crystal:1,tileswap:1,cube:1,faces:1,write:1}};
 const gscale=id=>((cfg.gsize&&cfg.gsize[id])||1);
@@ -462,7 +462,7 @@ function renderToday(v){
       <h2>Load a practice deck</h2>
       <p>Export a deck zip from Kanji Media Studio on your PC, drop it in OneDrive,
       then pick it here from the Files app. It's stored on this device afterwards.</p>
-      <button class="btn" id="heroImport">Import deck zip</button></div>`;
+      <button class="btn" id="heroImport">Import zip (deck · schedule · walk pack)</button></div>`;
     $("#heroImport").onclick=()=>$("#zipInput").click();return;}
   const due=dueEvents();
   const today=todayStr();
@@ -1004,8 +1004,19 @@ function renderWalkPlayer(v){
          (o>=prev-0.5&&(best<prev-0.5||o<best))))best=o;}
     return Math.max(0,Math.min(meta.dur,best??0));};
   let pv=-1;const offs=sents.map(x=>{pv=offOf(x,pv);return pv;});
-  const rubyOf=x=>buildGroups(x).map(g=>
-    g.rt?`<ruby>${esc(g.base)}<rt>${esc(g.rt)}</rt></ruby>`:esc(g.base)).join("");
+  const CLIP_PAD=0.15;
+  const lines=sents.map((x,i)=>{
+    const gs=buildGroups(x);
+    const hasKt=!!x.kt;
+    const nxt=i+1<offs.length?offs[i+1]:meta.dur;
+    for(const g of gs)
+      g.pt=hasKt
+        ?Math.min(Math.max(offs[i]+g.t0-CLIP_PAD,offs[i]),Math.max(offs[i],nxt-0.05))
+        :offs[i];
+    return {gs,hasKt};});
+  const spansOf=(i,tag)=>lines[i].gs.map((g,gi)=>{
+    const inner=g.rt?`<ruby>${esc(g.base)}<rt>${esc(g.rt)}</rt></ruby>`:esc(g.base);
+    return `<span class="kg" data-${tag}="${gi}">${inner}</span>`;}).join("");
   v.innerHTML=`<div class="gstat">
       <button class="btn small quiet" id="wpBack">‹ 歩</button>
       <span>p${String(page).padStart(3,"0")} · walking</span>
@@ -1017,23 +1028,27 @@ function renderWalkPlayer(v){
       <button class="btn small ghost" id="wpB10">↺10</button>
       <button class="btn" id="wpPlay">▶</button>
       <button class="btn small ghost" id="wpF10">↻10</button>
-      <button class="btn small ghost" id="wpNext">line ⏭</button></div>
+      <button class="btn small ghost" id="wpNext">line ⏭</button>
+      <button class="btn small ghost" id="wpRep"></button></div>
     <div class="fsent" id="wpLine" style="text-align:center;min-height:64px;
       font-size:22px;margin:6px 0 10px"></div>
     <div class="rwrap" id="wpList"></div>`;
   const list=v.querySelector("#wpList");
   sents.forEach((x,i)=>{
     const d=document.createElement("div");
-    d.className="rsent";d.dataset.i=i;d.innerHTML=rubyOf(x);
-    d.onclick=()=>jump(i,true);
+    d.className="rsent";d.dataset.i=i;d.innerHTML=spansOf(i,"g");
+    d.onclick=e=>{
+      const kg=e.target.closest(".kg");
+      if(kg){jump(i,true);audioEl.currentTime=lines[i].gs[+kg.dataset.g].pt+0.02;}
+      else jump(i,true);};
     list.appendChild(d);});
-  walkPS={raf:0,cur:-1,ready:false};
+  walkPS={raf:0,cur:-1,curG:-1,ready:false,loop:1,ticked:false};
   const st=walkPS;
   const lineAt=t=>{let i=0;while(i+1<offs.length&&offs[i+1]<=t+0.05)i++;return i;};
   const paint=i=>{
     if(i===st.cur)return;
-    st.cur=i;
-    v.querySelector("#wpLine").innerHTML=rubyOf(sents[i]);
+    st.cur=i;st.curG=-1;
+    v.querySelector("#wpLine").innerHTML=spansOf(i,"b");
     list.querySelectorAll(".rsent").forEach((el,k)=>{
       el.classList.toggle("cur",k===i);});
     const el=list.querySelector(`.rsent[data-i="${i}"]`);
@@ -1044,11 +1059,33 @@ function renderWalkPlayer(v){
         artist:`p${String(page).padStart(3,"0")} · line ${i+1}/${sents.length}`,
         album:(app.deck.media&&app.deck.media.title)||"kanji practice"});}};
   const fmt=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,"0")}`;
+  const rep=()=>cfg.walkRepeat===Infinity?"∞":`×${cfg.walkRepeat}`;
+  const paintRep=()=>{v.querySelector("#wpRep").textContent=
+    `🔁 ${rep()}${cfg.walkRepeat!==1?` · ${st.loop}`:""}`;};
   const tick=()=>{
     if(!walkPS)return;
     const t=audioEl.currentTime;
     v.querySelector("#wpTime").textContent=`${fmt(t)} / ${fmt(meta.dur)}`;
-    paint(lineAt(t));
+    const i=lineAt(t);
+    paint(i);
+    const L=lines[i];
+    let gi=-1;
+    if(L.hasKt){for(let g=0;g<L.gs.length;g++)
+      if(L.gs[g].pt<=t+0.03)gi=g;else break;}
+    if(gi!==st.curG||!L.hasKt){
+      st.curG=gi;
+      // words with (near-)identical timestamps have no real distinction:
+      // light the whole run together — the in-sentence gap rule
+      let lo=gi,hi=gi;
+      if(L.hasKt&&gi>=0){
+        while(lo>0&&Math.abs(L.gs[lo-1].pt-L.gs[gi].pt)<0.02)lo--;
+        while(hi+1<L.gs.length&&Math.abs(L.gs[hi+1].pt-L.gs[gi].pt)<0.02)hi++;}
+      const mark=el=>{el.querySelectorAll(".kg").forEach((sp,g)=>
+        sp.classList.toggle("on",
+          (!L.hasKt||(g>=lo&&g<=hi))&&!L.gs[g].punct));};
+      mark(v.querySelector("#wpLine"));
+      const row=list.querySelector(`.rsent[data-i="${i}"]`);
+      if(row)mark(row);}
     st.raf=requestAnimationFrame(tick);};
   const setPlayBtn=()=>{v.querySelector("#wpPlay").textContent=
     audioEl.paused?"▶":"⏸";};
@@ -1069,10 +1106,15 @@ function renderWalkPlayer(v){
       audioEl.src=URL.createObjectURL(blob);
       audioEl.playbackRate=1;
       audioEl.onended=()=>{
-        const d=todayStr();
-        P.walk=P.walk||{};P.walk[d]=P.walk[d]||{};
-        P.walk[d][page]=true;saveProgress();
-        toast(`p${String(page).padStart(3,"0")} 完 — ticked ✓`);
+        if(!st.ticked){st.ticked=true;
+          const d=todayStr();
+          P.walk=P.walk||{};P.walk[d]=P.walk[d]||{};
+          P.walk[d][page]=true;saveProgress();
+          toast(`p${String(page).padStart(3,"0")} 完 — ticked ✓`);}
+        if(st.loop<cfg.walkRepeat){
+          st.loop++;paintRep();
+          audioEl.currentTime=0;
+          audioEl.play().catch(()=>{});}
         setPlayBtn();};
       await audioEl.play();
       st.ready=true;setPlayBtn();
@@ -1105,6 +1147,11 @@ function renderWalkPlayer(v){
     Math.max(0,audioEl.currentTime-10);};
   v.querySelector("#wpF10").onclick=()=>{audioEl.currentTime=
     Math.min(meta.dur,audioEl.currentTime+10);};
+  v.querySelector("#wpRep").onclick=()=>{
+    const seq=[1,3,10,Infinity];
+    cfg.walkRepeat=seq[(seq.indexOf(cfg.walkRepeat)+1)%seq.length];
+    st.loop=1;save();paintRep();};
+  paintRep();
   unlockAudio();
   start();
 }
@@ -1125,8 +1172,18 @@ function renderWalk(v){
     .filter(d=>d>=from.toISOString().slice(0,10)).slice(0,70);
   v.innerHTML=`<div class="gstat"><span>歩 walking listening</span>
       <span>tick pages as you listen</span></div>
-    <div class="stephint">files live in OneDrive · walking/pNNN/pNNN.m4a</div>
+    ${app.walkMeta
+      ?`<div class="stephint">walk audio imported ·
+          ${Object.keys(app.walkMeta.pages||{}).length} pages · tap ▶ on a page</div>`
+      :`<div class="card" style="margin:8px 0"><b>No walk audio yet</b>
+          <div class="stephint" style="margin:4px 0 8px">export
+          <code>walk_pack.zip</code> on the PC (Tab 3 · Export walking audio),
+          put it where this phone can pick it, then import it here — your
+          deck is untouched. Without it, this tab is checklist-only.</div>
+          <button class="btn small" id="wkImport">Import walk_pack.zip</button></div>`}
     <div id="wkList" style="margin-top:8px"></div>`;
+  const imp=v.querySelector("#wkImport");
+  if(imp)imp.onclick=()=>$("#zipInput").click();
   const list=v.querySelector("#wkList");
   for(const d of dates){
     const {nw,rv}=days[d];
@@ -1794,6 +1851,7 @@ window.addEventListener("visibilitychange",()=>{
     if(deck)app.deck=deck;
     if(sch)app.schedule=sch;
     if(prog)P=Object.assign(P,prog);
+    if(c&&c.walkRepeat===null)c.walkRepeat=Infinity;
     if(c)cfg=Object.assign({},DEFAULT_CFG,c,
       {games:Object.assign({},DEFAULT_CFG.games,(c.games||{})),
        gsize:Object.assign({},DEFAULT_CFG.gsize,(c.gsize||{}))});
