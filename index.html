@@ -239,7 +239,7 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09n";
+const BUILD="2026-08-09o";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
   recordSpeak:false,walkRepeat:1,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
@@ -1153,7 +1153,7 @@ function renderWalkPlayer(v){
   v.querySelector("#wpRep").onclick=()=>{
     const seq=[1,3,10,Infinity];
     cfg.walkRepeat=seq[(seq.indexOf(cfg.walkRepeat)+1)%seq.length];
-    st.loop=1;save();paintRep();};
+    st.loop=1;kvSet("cfg",cfg);paintRep();};
   paintRep();
   unlockAudio();
   start();
