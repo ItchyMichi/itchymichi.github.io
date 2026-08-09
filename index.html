@@ -170,6 +170,18 @@ canvas.crystalC{width:126px; height:190px; cursor:pointer; -webkit-tap-highlight
   min-height:50px; flex-wrap:wrap;}
 .wstrip canvas{width:46px; height:46px; border:1px solid var(--line);
   border-radius:6px; background:var(--card);}
+.rwrap{max-width:720px; margin:0 auto; padding-bottom:86px;}
+.rsent{font-family:var(--serif); font-size:21px; line-height:2.3; margin:10px 0;
+  padding:4px 8px; border-radius:10px; color:var(--ink2); transition:color .2s;}
+.rsent.cur{color:var(--ink); background:rgba(58,63,106,.06);}
+.kg{border-radius:6px; padding:1px 1px; cursor:pointer;
+  -webkit-tap-highlight-color:transparent;}
+.kg.on{background:var(--indigo); color:#fdfcf7;}
+.kg.on rt{color:#fdfcf7;}
+.rbar{position:fixed; left:0; right:0; bottom:0; background:var(--card);
+  border-top:1px solid var(--line); padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+  display:flex; gap:10px; justify-content:center; align-items:center; z-index:30;}
+.rbar .btn{min-width:56px;}
 .bigk{font-family:var(--serif); font-size:96px; text-align:center; margin:20px 0;}
 canvas.gcanvas{display:block; width:100%; border:1px solid var(--line);
   border-radius:var(--r); background:var(--card); touch-action:none;}
@@ -219,7 +231,7 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09c";
+const BUILD="2026-08-09d";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
   recordSpeak:false,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
@@ -398,9 +410,9 @@ function render(){
     b.classList.toggle("active",b.dataset.v===app.view));
   $("#mediaName").textContent=app.deck?app.deck.media.title:"";
   paintPoints();
-  cancelFlow();stopGame();
+  cancelFlow();stopGame();stopRead();
   const v=$("#view");v.scrollTop=0;
-  ({today:renderToday,session:renderSession,library:renderLibrary,
+  ({today:renderToday,session:renderSession,library:renderLibrary,read:renderRead,
     page:renderPage,games:renderGames,game:renderGameRun,
     settings:renderSettings}[app.view]||renderToday)(v);}
 document.querySelectorAll("#tabbar button").forEach(b=>
@@ -757,7 +769,8 @@ function renderPage(v){
   let html=`<div class="sess-top">
     <button class="btn small quiet" id="backLib">‹ Library</button>
     <div class="prog">p${String(n).padStart(3,"0")} · ${esc(r.chapter)}</div>
-    <button class="btn small" id="freePractice">Practise</button></div>`;
+    <button class="btn small" id="freePractice">Practise</button>
+    <button class="btn small ghost" id="readAlong">読む Read along</button></div>`;
   for(const sid of r.sentence_ids){
     const s=S(sid);if(!s)continue;
     const rb=rubyParts(s);
@@ -768,6 +781,7 @@ function renderPage(v){
   html+=`<div class="kchips" style="margin-top:14px">${r.kanji.map(k=>`<span>${k}</span>`).join("")}</div>`;
   v.innerHTML=html;
   $("#backLib").onclick=()=>setView("library");
+  $("#readAlong").onclick=()=>setView("read",app.sub);
   $("#freePractice").onclick=()=>startSession(
     {page:n,type:"free",date:todayStr(),kanji:r.practice_kanji},"free");
   v.querySelectorAll("[data-sid]").forEach(b=>b.onclick=async()=>{
@@ -786,6 +800,124 @@ function renderPage(v){
       await sleep(700);}});}
 
 /* ============================================================= settings */
+let readState=null;
+function stopRead(){
+  if(!readState)return;
+  cancelAnimationFrame(readState.raf);
+  audioEl.pause();
+  readState=null;}
+
+function buildGroups(sent){
+  // groups aligned to text offsets, from the furigana markup; each group
+  // carries its start time from kt (fallback: whole sentence = one group)
+  const text=sent.text, kt=sent.kt||null, groups=[];
+  const re=/([\u3400-\u9fff々]+)\[([^\]]+)\]/g;
+  let m,last=0,off=0;
+  const plain=str=>{ // split plain runs at punctuation, keep kana runs whole
+    let buf="",start=off;
+    const flushP=()=>{if(buf){groups.push({o:start,n:buf.length,base:buf,rt:null});buf="";}};
+    for(const ch of str){
+      if("、。！？!?…‥「」『』（）()　 ".includes(ch)){
+        flushP();groups.push({o:off,n:1,base:ch,rt:null,punct:true});off++;start=off;}
+      else{if(!buf)start=off;buf+=ch;off++;}}
+    flushP();};
+  const reading=sent.reading||"";
+  if(reading){
+    while((m=re.exec(reading))){
+      const pre=reading.slice(last,m.index);
+      if(pre)plain(pre);
+      groups.push({o:off,n:m[1].length,base:m[1],rt:m[2]});
+      off+=m[1].length;last=re.lastIndex;}
+    const tail=reading.slice(last);
+    if(tail)plain(tail);}
+  if(!groups.length||off!==text.length){          // markup mismatch: fallback
+    groups.length=0;groups.push({o:0,n:text.length,base:text,rt:null});}
+  for(const g of groups)
+    g.t0=kt?(kt[g.o]??0):0;
+  return groups;}
+
+function renderRead(v){
+  const page=app.sub;
+  const sents=(app.deck?.sentences||[]).filter(x=>x.page===page&&x.clip);
+  if(!sents.length){v.innerHTML=`<div class="hero"><div class="glyph">静</div>
+    <p>No audio sentences on page ${page}.</p>
+    <button class="btn" onclick="setView('library',${page})">Back</button></div>`;return;}
+  const hasKt=sents.some(x=>x.kt);
+  v.innerHTML=`<div class="gstat">
+      <button class="btn small quiet" id="rBack">‹ p${page}</button>
+      <span>読む · page ${page}${hasKt?"":" · (re-export deck for word timing)"}</span>
+      <span>${cfg.rate.toFixed(2)}×</span></div>
+    <div class="rwrap" id="rText"></div>
+    <div class="rbar">
+      <button class="btn small ghost" id="rPrev">⏮</button>
+      <button class="btn small ghost" id="rB5">↺5</button>
+      <button class="btn" id="rPlay">▶</button>
+      <button class="btn small ghost" id="rNext">⏭</button>
+    </div>`;
+  const wrap=v.querySelector("#rText");
+  const S=sents.map((sent,i)=>{
+    const groups=buildGroups(sent);
+    const div=document.createElement("div");
+    div.className="rsent";div.dataset.i=i;
+    div.innerHTML=groups.map((g,gi)=>{
+      const inner=g.rt?`<ruby>${esc(g.base)}<rt>${esc(g.rt)}</rt></ruby>`:esc(g.base);
+      return `<span class="kg" data-i="${i}" data-g="${gi}">${inner}</span>`;}).join("");
+    wrap.appendChild(div);
+    return {sent,groups,div,els:[...div.querySelectorAll(".kg")]};});
+  readState={i:0,playing:false,raf:0,S};
+  const st=readState;
+  const paintSent=()=>{S.forEach((x,k)=>x.div.classList.toggle("cur",k===st.i));};
+  const clearHL=()=>{for(const x of S)for(const el of x.els)el.classList.remove("on");};
+  const tick=()=>{
+    if(!readState)return;
+    const x=S[st.i],t=audioEl.currentTime;
+    let on=-1;
+    for(let g=0;g<x.groups.length;g++)
+      if(x.groups[g].t0<=t+0.02)on=g;else break;
+    x.els.forEach((el,g)=>el.classList.toggle("on",g===on&&!x.groups[g].punct));
+    st.raf=requestAnimationFrame(tick);};
+  const play=async i=>{
+    st.i=Math.max(0,Math.min(S.length-1,i));
+    paintSent();clearHL();
+    S[st.i].div.scrollIntoView({block:"center",behavior:"smooth"});
+    try{
+      const url=await clipUrl(S[st.i].sent.clip);
+      if(!readState)return;
+      if(audioEl.src!==url)audioEl.src=url;
+      audioEl.currentTime=0;audioEl.playbackRate=cfg.rate;
+      await audioEl.play();
+      st.playing=true;$("#rPlay").textContent="⏸";
+      cancelAnimationFrame(st.raf);st.raf=requestAnimationFrame(tick);
+    }catch(err){
+      if(!app._audioErrToasted){app._audioErrToasted=true;
+        toast("Audio unavailable: "+(err&&err.message||err));}}};
+  audioEl.onended=()=>{
+    if(!readState)return;
+    if(st.i+1<S.length)play(st.i+1);
+    else{st.playing=false;$("#rPlay").textContent="▶";clearHL();toast("page done 了");}};
+  $("#rBack").onclick=()=>setView("library",page);
+  $("#rPlay").onclick=()=>{
+    if(st.playing){audioEl.pause();st.playing=false;$("#rPlay").textContent="▶";}
+    else if(audioEl.src){audioEl.play().catch(()=>{});st.playing=true;
+      $("#rPlay").textContent="⏸";cancelAnimationFrame(st.raf);st.raf=requestAnimationFrame(tick);}
+    else play(0);};
+  $("#rPrev").onclick=()=>play(st.i-1);
+  $("#rNext").onclick=()=>play(st.i+1);
+  $("#rB5").onclick=()=>{audioEl.currentTime=Math.max(0,audioEl.currentTime-5);};
+  wrap.onclick=e=>{
+    const kg=e.target.closest(".kg");if(!kg)return;
+    const i=+kg.dataset.i,g=+kg.dataset.g;
+    const go=async()=>{
+      if(i!==st.i){await play(i);}
+      const t=S[i].groups[g].t0;
+      audioEl.currentTime=Math.max(0,t);
+      if(!st.playing){audioEl.play().catch(()=>{});st.playing=true;
+        $("#rPlay").textContent="⏸";cancelAnimationFrame(st.raf);
+        st.raf=requestAnimationFrame(tick);}};
+    go();};
+  unlockAudio();
+}
+
 function renderSettings(v){
   const est={usage:0,quota:0};
   v.innerHTML=`
