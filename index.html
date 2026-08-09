@@ -170,7 +170,10 @@ canvas.crystalC{width:126px; height:190px; cursor:pointer; -webkit-tap-highlight
   min-height:50px; flex-wrap:wrap;}
 .wstrip canvas{width:46px; height:46px; border:1px solid var(--line);
   border-radius:6px; background:var(--card);}
-.rwrap{max-width:720px; margin:0 auto; padding-bottom:86px;}
+canvas{touch-action:none; -webkit-user-select:none; user-select:none;}
+.gwrap,.wcell,.wdemo,.wrow,.wstrip,#padZone,.rwrap,.crystalrow{
+  -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;}
+.rwrap{max-width:720px; margin:0 auto; padding-bottom:76px;}
 .rsent{font-family:var(--serif); font-size:21px; line-height:2.3; margin:10px 0;
   padding:4px 8px; border-radius:10px; color:var(--ink2); transition:color .2s;}
 .rsent.cur{color:var(--ink); background:rgba(58,63,106,.06);}
@@ -178,9 +181,12 @@ canvas.crystalC{width:126px; height:190px; cursor:pointer; -webkit-tap-highlight
   -webkit-tap-highlight-color:transparent;}
 .kg.on{background:var(--indigo); color:#fdfcf7;}
 .kg.on rt{color:#fdfcf7;}
-.rbar{position:fixed; left:0; right:0; bottom:0; background:var(--card);
-  border-top:1px solid var(--line); padding:10px 14px calc(10px + env(safe-area-inset-bottom));
-  display:flex; gap:10px; justify-content:center; align-items:center; z-index:30;}
+.rbar{position:sticky; top:6px; z-index:20;
+  background:color-mix(in srgb, var(--card) 96%, white);
+  border:1px solid var(--line); border-radius:14px;
+  padding:8px 12px; margin:2px 0 12px;
+  display:flex; gap:10px; justify-content:center; align-items:center;
+  box-shadow:0 2px 10px rgba(38,38,46,.06);}
 .rbar .btn{min-width:56px;}
 .bigk{font-family:var(--serif); font-size:96px; text-align:center; margin:20px 0;}
 canvas.gcanvas{display:block; width:100%; border:1px solid var(--line);
@@ -231,7 +237,7 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09d";
+const BUILD="2026-08-09e";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
   recordSpeak:false,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
@@ -847,13 +853,13 @@ function renderRead(v){
       <button class="btn small quiet" id="rBack">‹ p${page}</button>
       <span>読む · page ${page}${hasKt?"":" · (re-export deck for word timing)"}</span>
       <span>${cfg.rate.toFixed(2)}×</span></div>
-    <div class="rwrap" id="rText"></div>
     <div class="rbar">
       <button class="btn small ghost" id="rPrev">⏮</button>
       <button class="btn small ghost" id="rB5">↺5</button>
       <button class="btn" id="rPlay">▶</button>
       <button class="btn small ghost" id="rNext">⏭</button>
-    </div>`;
+    </div>
+    <div class="rwrap" id="rText"></div>`;
   const wrap=v.querySelector("#rText");
   const S=sents.map((sent,i)=>{
     const groups=buildGroups(sent);
@@ -916,6 +922,7 @@ function renderRead(v){
         st.raf=requestAnimationFrame(tick);}};
     go();};
   unlockAudio();
+  play(0);                      // entering via the 読む tap is the gesture
 }
 
 function renderSettings(v){
@@ -1246,7 +1253,8 @@ const gameCube={title:"Kanji cube",icon:"回",blurb:"swipe rows & columns back i
     let start=null;
     const posOf=e=>{const r=cv.getBoundingClientRect();
       return [(e.clientX-r.left)/r.width*N|0,(e.clientY-r.top)/r.height*N|0,e.clientX,e.clientY];};
-    cv.onpointerdown=e=>{cv.setPointerCapture(e.pointerId);start=posOf(e);};
+    cv.onpointerdown=e=>{e.preventDefault();
+      cv.setPointerCapture(e.pointerId);start=posOf(e);};
     cv.onpointermove=e=>{
       if(!start||!movable)return;
       const dx=e.clientX-start[2],dy=e.clientY-start[3];
