@@ -222,6 +222,7 @@ select,input[type=date]{font-size:15px; padding:6px; border-radius:8px;
 <nav class="tabbar" id="tabbar">
   <button data-v="today"><span class="g">今</span>Today</button>
   <button data-v="library"><span class="g">庫</span>Library</button>
+  <button data-v="walk"><span class="g">歩</span>Walk</button>
   <button data-v="games"><span class="g">遊</span>Games</button>
   <button data-v="settings"><span class="g">設</span>Settings</button>
 </nav>
@@ -237,7 +238,7 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09h";
+const BUILD="2026-08-09j";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
   recordSpeak:false,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
@@ -294,6 +295,19 @@ async function ensureZip(){
   app.zip={file:f,index};
   return app.zip;}
 
+async function ensureWalkZip(){
+  if(app.walkZip)return app.walkZip;
+  const f=await fileGet("walk.zip");
+  if(!f)throw new Error("walk pack not imported");
+  let index=await kvGet("walkIndex");
+  if(!index){const parsed=await readZip(f);index={};
+    for(const e of parsed.entries)
+      if(e.name.startsWith("walking/"))
+        index[e.name]={off:e.off,csize:e.csize,usize:e.usize,method:e.method};
+    await kvSet("walkIndex",index);}
+  app.walkZip={file:f,index};
+  return app.walkZip;}
+
 async function wipeAll(){const d=await db();for(const s of["files","kv"]){
   const tx=d.transaction(s,"readwrite");tx.objectStore(s).clear();
   await new Promise(r=>tx.oncomplete=r);}}
@@ -349,6 +363,23 @@ async function importZip(file){
   try{
     const zip=await readZip(file);
     const find=n=>zip.entries.find(e=>e.name===n);
+    const wk=find("walk.json");
+    if(wk){
+      const meta=JSON.parse(await(await zipEntryBlob(zip,wk)).text());
+      if(meta.format!=="kanji-walk-pack")throw new Error("unrecognised walk pack");
+      say("Saving walk audio to device storage…",0.5);
+      const idx={};
+      for(const e of zip.entries)
+        if(e.name.startsWith("walking/"))
+          idx[e.name]={off:e.off,csize:e.csize,usize:e.usize,method:e.method};
+      await filePut("walk.zip",file);
+      await kvSet("walkIndex",idx);
+      await kvSet("walkMeta",meta);
+      app.walkMeta=meta;app.walkZip=null;
+      say("Walk pack ready",1);
+      setTimeout(()=>{ov.remove();toast(`Walk pack: ${Object.keys(meta.pages).length} pages ▶`);
+        setView("walk");},600);
+      return;}
     const de=find("deck.json"),se=find("schedule.json");
     if(!de&&se){ // schedule-only update
       const sch=JSON.parse(await(await zipEntryBlob(zip,se)).text());
@@ -416,9 +447,9 @@ function render(){
     b.classList.toggle("active",b.dataset.v===app.view));
   $("#mediaName").textContent=app.deck?app.deck.media.title:"";
   paintPoints();
-  cancelFlow();stopGame();stopRead();
+  cancelFlow();stopGame();stopRead();stopWalkPlay();
   const v=$("#view");v.scrollTop=0;
-  ({today:renderToday,session:renderSession,library:renderLibrary,read:renderRead,
+  ({today:renderToday,session:renderSession,library:renderLibrary,read:renderRead,walk:renderWalk,walkplay:renderWalkPlayer,
     page:renderPage,games:renderGames,game:renderGameRun,
     settings:renderSettings}[app.view]||renderToday)(v);}
 document.querySelectorAll("#tabbar button").forEach(b=>
@@ -948,6 +979,198 @@ function renderRead(v){
     go();};
   unlockAudio();
   play(0);                      // entering via the 読む tap is the gesture
+}
+
+let walkPS=null;
+function stopWalkPlay(){
+  if(!walkPS)return;
+  cancelAnimationFrame(walkPS.raf);audioEl.pause();
+  audioEl.onended=null;walkPS=null;}
+
+function renderWalkPlayer(v){
+  const page=app.sub;
+  const meta=app.walkMeta&&app.walkMeta.pages&&app.walkMeta.pages[page];
+  const sents=(app.deck?.sentences||[]).filter(x=>x.page===page)
+    .sort((a,b)=>a.start-b.start);
+  if(!meta||!sents.length){
+    v.innerHTML=`<div class="hero"><div class="glyph">歩</div>
+      <p>No walk audio for page ${page}.</p>
+      <button class="btn" onclick="setView('walk')">Back</button></div>`;return;}
+  const offOf=(s,prev)=>{
+    let best=null;
+    for(const pt of meta.parts||[{t0:0,offset:0}]){
+      const o=pt.offset+s.start-pt.t0;
+      if(o>=-0.3&&o<=meta.dur+0.3&&(best===null||
+         (o>=prev-0.5&&(best<prev-0.5||o<best))))best=o;}
+    return Math.max(0,Math.min(meta.dur,best??0));};
+  let pv=-1;const offs=sents.map(x=>{pv=offOf(x,pv);return pv;});
+  const rubyOf=x=>buildGroups(x).map(g=>
+    g.rt?`<ruby>${esc(g.base)}<rt>${esc(g.rt)}</rt></ruby>`:esc(g.base)).join("");
+  v.innerHTML=`<div class="gstat">
+      <button class="btn small quiet" id="wpBack">‹ 歩</button>
+      <span>p${String(page).padStart(3,"0")} · walking</span>
+      <span id="wpTime">0:00</span></div>
+    ${navigator.standalone?`<div class="stephint">screen-off listening: open this
+      site in Safari — the home-screen app pauses when locked</div>`:""}
+    <div class="rbar">
+      <button class="btn small ghost" id="wpPrev">⏮ line</button>
+      <button class="btn small ghost" id="wpB10">↺10</button>
+      <button class="btn" id="wpPlay">▶</button>
+      <button class="btn small ghost" id="wpF10">↻10</button>
+      <button class="btn small ghost" id="wpNext">line ⏭</button></div>
+    <div class="fsent" id="wpLine" style="text-align:center;min-height:64px;
+      font-size:22px;margin:6px 0 10px"></div>
+    <div class="rwrap" id="wpList"></div>`;
+  const list=v.querySelector("#wpList");
+  sents.forEach((x,i)=>{
+    const d=document.createElement("div");
+    d.className="rsent";d.dataset.i=i;d.innerHTML=rubyOf(x);
+    d.onclick=()=>jump(i,true);
+    list.appendChild(d);});
+  walkPS={raf:0,cur:-1,ready:false};
+  const st=walkPS;
+  const lineAt=t=>{let i=0;while(i+1<offs.length&&offs[i+1]<=t+0.05)i++;return i;};
+  const paint=i=>{
+    if(i===st.cur)return;
+    st.cur=i;
+    v.querySelector("#wpLine").innerHTML=rubyOf(sents[i]);
+    list.querySelectorAll(".rsent").forEach((el,k)=>{
+      el.classList.toggle("cur",k===i);});
+    const el=list.querySelector(`.rsent[data-i="${i}"]`);
+    if(el)el.scrollIntoView({block:"nearest",behavior:"smooth"});
+    if("mediaSession" in navigator){
+      navigator.mediaSession.metadata=new MediaMetadata({
+        title:`${sents[i].text.slice(0,60)}`,
+        artist:`p${String(page).padStart(3,"0")} · line ${i+1}/${sents.length}`,
+        album:(app.deck.media&&app.deck.media.title)||"kanji practice"});}};
+  const fmt=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,"0")}`;
+  const tick=()=>{
+    if(!walkPS)return;
+    const t=audioEl.currentTime;
+    v.querySelector("#wpTime").textContent=`${fmt(t)} / ${fmt(meta.dur)}`;
+    paint(lineAt(t));
+    st.raf=requestAnimationFrame(tick);};
+  const setPlayBtn=()=>{v.querySelector("#wpPlay").textContent=
+    audioEl.paused?"▶":"⏸";};
+  const jump=(i,go)=>{
+    i=Math.max(0,Math.min(sents.length-1,i));
+    audioEl.currentTime=offs[i]+0.02;
+    paint(i);
+    if(go&&audioEl.paused)audioEl.play().catch(()=>{});
+    setPlayBtn();};
+  const start=async()=>{
+    try{
+      const z=await ensureWalkZip();
+      const m=z.index[meta.file];
+      if(!m)throw new Error("page audio missing from pack");
+      let blob=await zipEntryBlob({file:z.file},m,"audio/mp4");
+      blob=new Blob([await blob.arrayBuffer()],{type:"audio/mp4"});
+      if(!walkPS)return;
+      audioEl.src=URL.createObjectURL(blob);
+      audioEl.playbackRate=1;
+      audioEl.onended=()=>{
+        const d=todayStr();
+        P.walk=P.walk||{};P.walk[d]=P.walk[d]||{};
+        P.walk[d][page]=true;saveProgress();
+        toast(`p${String(page).padStart(3,"0")} 完 — ticked ✓`);
+        setPlayBtn();};
+      await audioEl.play();
+      st.ready=true;setPlayBtn();
+      cancelAnimationFrame(st.raf);st.raf=requestAnimationFrame(tick);
+      if("mediaSession" in navigator){
+        const ms=navigator.mediaSession;
+        try{
+          ms.setActionHandler("play",()=>{audioEl.play();setPlayBtn();});
+          ms.setActionHandler("pause",()=>{audioEl.pause();setPlayBtn();});
+          ms.setActionHandler("previoustrack",()=>{
+            const t=audioEl.currentTime;
+            jump(t-offs[st.cur]>1.6?st.cur:st.cur-1,true);});
+          ms.setActionHandler("nexttrack",()=>jump(st.cur+1,true));
+          ms.setActionHandler("seekbackward",()=>{audioEl.currentTime=
+            Math.max(0,audioEl.currentTime-10);});
+          ms.setActionHandler("seekforward",()=>{audioEl.currentTime=
+            Math.min(meta.dur,audioEl.currentTime+10);});
+        }catch(_){}}
+    }catch(err){toast("Walk audio: "+(err&&err.message||err));}};
+  v.querySelector("#wpBack").onclick=()=>setView("walk");
+  v.querySelector("#wpPlay").onclick=()=>{
+    if(!st.ready){start();return;}
+    if(audioEl.paused)audioEl.play().catch(()=>{});else audioEl.pause();
+    setPlayBtn();};
+  v.querySelector("#wpPrev").onclick=()=>{
+    const t=audioEl.currentTime;
+    jump(t-offs[Math.max(0,st.cur)]>1.6?st.cur:st.cur-1,true);};
+  v.querySelector("#wpNext").onclick=()=>jump(st.cur+1,true);
+  v.querySelector("#wpB10").onclick=()=>{audioEl.currentTime=
+    Math.max(0,audioEl.currentTime-10);};
+  v.querySelector("#wpF10").onclick=()=>{audioEl.currentTime=
+    Math.min(meta.dur,audioEl.currentTime+10);};
+  unlockAudio();
+  start();
+}
+
+function renderWalk(v){
+  if(!app.schedule||!app.schedule.entries?.length){
+    v.innerHTML=`<div class="hero"><div class="glyph">歩</div>
+      <p>No schedule yet — import a deck first.</p></div>`;return;}
+  P.walk=P.walk||{};
+  const days={};   // date -> {nw:[pages], rv:[pages]}
+  for(const e of app.schedule.entries){
+    if(e.intro)(days[e.intro]=days[e.intro]||{nw:[],rv:[]}).nw.push(e.page);
+    for(const d of (e.reviews||[]))
+      (days[d]=days[d]||{nw:[],rv:[]}).rv.push(e.page);}
+  const today=todayStr();
+  const from=new Date(today);from.setDate(from.getDate()-7);
+  const dates=Object.keys(days).sort()
+    .filter(d=>d>=from.toISOString().slice(0,10)).slice(0,70);
+  v.innerHTML=`<div class="gstat"><span>歩 walking listening</span>
+      <span>tick pages as you listen</span></div>
+    <div class="stephint">files live in OneDrive · walking/pNNN/pNNN.m4a</div>
+    <div id="wkList" style="margin-top:8px"></div>`;
+  const list=v.querySelector("#wkList");
+  for(const d of dates){
+    const {nw,rv}=days[d];
+    const total=nw.length+rv.length;
+    const isToday=d===today;
+    const card=document.createElement("div");
+    card.className="card";card.style.marginBottom="10px";
+    card.innerHTML=`<div class="wkhead" style="display:flex;justify-content:space-between;
+        align-items:center;cursor:pointer;gap:8px">
+      <b>${d}${isToday?" · today":""}</b>
+      <span class="wkcount" style="color:var(--ink2)"></span></div>
+      <div class="wkbody" ${isToday?"":"hidden"} style="margin-top:6px"></div>`;
+    const body=card.querySelector(".wkbody");
+    const countEl=card.querySelector(".wkcount");
+    const paintCount=()=>{
+      const dn=[...nw,...rv].filter(pg=>(P.walk[d]||{})[pg]).length;
+      countEl.textContent=`${nw.length} new · ${rv.length} review · ${dn}/${total} ✓`;
+      return dn;};
+    const row=(pg,kind)=>{
+      const hasA=!!(app.walkMeta&&app.walkMeta.pages&&app.walkMeta.pages[pg]);
+      return `<label class="field" style="gap:10px">
+        <span>${hasA?`<button class="btn small ghost" data-play="${pg}"
+            style="margin-right:6px">▶</button>`:""}<b>p${String(pg).padStart(3,"0")}</b>
+          <span style="color:var(--ink2)"> · ${kind}</span></span>
+        <input type="checkbox" data-p="${pg}"
+          ${(P.walk[d]||{})[pg]?"checked":""}></label>`;};
+    body.innerHTML=[...nw.map(pg=>row(pg,"新 listen")),
+                    ...rv.map(pg=>row(pg,"復 review"))].join("")
+      ||`<div class="stephint">rest day</div>`;
+    body.querySelectorAll("[data-play]").forEach(b=>{
+      b.onclick=e=>{e.preventDefault();e.stopPropagation();
+        setView("walkplay",+b.dataset.play);};});
+    card.querySelector(".wkhead").onclick=e=>{
+      if(e.target.tagName!=="INPUT")body.hidden=!body.hidden;};
+    body.querySelectorAll("input[type=checkbox]").forEach(cb=>{
+      cb.onchange=()=>{
+        const pg=cb.dataset.p;
+        P.walk[d]=P.walk[d]||{};
+        if(cb.checked)P.walk[d][pg]=true;else delete P.walk[d][pg];
+        saveProgress();
+        if(paintCount()===total&&total)sfxGood();};});
+    paintCount();
+    list.appendChild(card);
+    if(isToday)setTimeout(()=>card.scrollIntoView({block:"start"}),60);}
 }
 
 function renderSettings(v){
@@ -1566,7 +1789,8 @@ window.addEventListener("visibilitychange",()=>{
   try{
     const [deck,sch,prog,c]=await Promise.all(
       [kvGet("deck"),kvGet("schedule"),kvGet("progress"),kvGet("cfg"),
-       kvGet("strokes").then(v=>{app.strokes=v||null;}).catch(()=>{})]);
+       kvGet("strokes").then(v=>{app.strokes=v||null;}).catch(()=>{}),
+       kvGet("walkMeta").then(v=>{app.walkMeta=v||null;}).catch(()=>{})]);
     if(deck)app.deck=deck;
     if(sch)app.schedule=sch;
     if(prog)P=Object.assign(P,prog);
