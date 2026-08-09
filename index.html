@@ -170,9 +170,9 @@ canvas.crystalC{width:126px; height:190px; cursor:pointer; -webkit-tap-highlight
   min-height:50px; flex-wrap:wrap;}
 .wstrip canvas{width:46px; height:46px; border:1px solid var(--line);
   border-radius:6px; background:var(--card);}
-canvas{touch-action:none; -webkit-user-select:none; user-select:none;}
-.gwrap,.wcell,.wdemo,.wrow,.wstrip,#padZone,.rwrap,.crystalrow{
-  -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;}
+html,body{-webkit-user-select:none; user-select:none; -webkit-touch-callout:none;}
+input,textarea{-webkit-user-select:text; user-select:text;}
+canvas{touch-action:none;}
 .rwrap{max-width:720px; margin:0 auto; padding-bottom:76px;}
 .rsent{font-family:var(--serif); font-size:21px; line-height:2.3; margin:10px 0;
   padding:4px 8px; border-radius:10px; color:var(--ink2); transition:color .2s;}
@@ -237,7 +237,7 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09e";
+const BUILD="2026-08-09f";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
   recordSpeak:false,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
