@@ -219,8 +219,9 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09b";
+const BUILD="2026-08-09c";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
+  recordSpeak:false,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
   gsize:{blanks:1,crystal:1,tileswap:1,cube:1,faces:1,write:1}};
 const gscale=id=>((cfg.gsize&&cfg.gsize[id])||1);
@@ -458,6 +459,50 @@ audioEl.preservesPitch=true; audioEl.setAttribute("playsinline","");
 const SILENT_WAV="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA=";
 function unlockAudio(){try{ac();audioEl.src=SILENT_WAV;audioEl.play().catch(()=>{});}catch(_){}}
 
+/* ----------------------------------------- speak-phase voice compare */
+const recEl=new Audio();
+const mic={stream:null,rec:null,chunks:[],url:null};
+function micSupported(){return !!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)
+  &&typeof MediaRecorder!=="undefined";}
+async function micStart(){
+  if(!cfg.recordSpeak)return false;
+  if(!micSupported()){micFail("recording isn't supported in this browser");return false;}
+  try{
+    if(!mic.stream||!mic.stream.active)
+      mic.stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    mic.chunks=[];
+    mic.rec=new MediaRecorder(mic.stream);
+    mic.rec.ondataavailable=e=>{if(e.data&&e.data.size)mic.chunks.push(e.data);};
+    mic.rec.start();
+    return true;
+  }catch(err){
+    micFail((err&&err.name)==="NotAllowedError"?"mic permission denied":"mic unavailable");
+    return false;}}
+function micFail(m){if(!app._micToasted){app._micToasted=true;
+  toast("Voice compare off — "+m);}}
+function micStop(){return new Promise(res=>{
+  const r=mic.rec;mic.rec=null;
+  if(!r||r.state==="inactive")return res(null);
+  r.onstop=()=>{const b=new Blob(mic.chunks,{type:r.mimeType||"audio/mp4"});
+    mic.chunks=[];res(b.size>200?b:null);};
+  try{r.stop();}catch(_){res(null);}});}
+function micDiscard(){
+  if(mic.url){URL.revokeObjectURL(mic.url);mic.url=null;}
+  try{if(mic.rec&&mic.rec.state!=="inactive")mic.rec.stop();}catch(_){}
+  mic.rec=null;mic.chunks=[];}
+function micRelease(){micDiscard();
+  try{if(mic.stream)mic.stream.getTracks().forEach(t=>t.stop());}catch(_){}
+  mic.stream=null;}
+async function playTake(tok){
+  if(!mic.url)return;
+  recEl.src=mic.url;recEl.currentTime=0;
+  try{await recEl.play();}catch(_){return;}
+  await new Promise(res=>{const iv=setInterval(()=>{
+    if(tok&&tok.c){recEl.pause();clearInterval(iv);return res();}
+    if(app.paused&&!recEl.paused)recEl.pause();
+    else if(!app.paused&&recEl.paused&&!recEl.ended)recEl.play().catch(()=>{});
+    if(recEl.ended){clearInterval(iv);res();}},100);});}
+
 const urlCache=new Map();
 async function clipUrl(path){
   if(urlCache.has(path)){const u=urlCache.get(path);urlCache.delete(path);urlCache.set(path,u);return u;}
@@ -499,8 +544,8 @@ async function wait(ms,tok){let left=ms;
 
 /* ============================================================== session */
 let flowTok=null;
-function cancelFlow(){if(flowTok)flowTok.c=true;flowTok=null;
-  audioEl.pause();app.paused=false;}
+function cancelFlow(){if(flowTok)flowTok.c=true;flowTok=null;micRelease();
+  audioEl.pause();recEl.pause();app.paused=false;}
 
 function startSession(ev,mode){
   const rec=pageRec(ev.page);
@@ -583,10 +628,19 @@ async function runFlow(s){
   setStep("ready","Get ready…",`beep in ${cfg.beepDelay}s — then say the line`);
   await wait(cfg.beepDelay*1000,tok);if(tok.c)return;
   beep();
-  setStep("speak","Your turn","say the whole line aloud");
-  await wait(Math.max(cfg.beepDelay,dur*1.25+1)*1000,tok);if(tok.c)return;
-  setStep("listen","Listen again","how close were you?");
+  const recOn=await micStart();if(tok.c){micDiscard();return;}
+  setStep("speak","Your turn",recOn?"say the line — recording to compare":"say the whole line aloud");
+  await wait(Math.max(cfg.beepDelay,dur*1.25+1)*1000,tok);
+  const take=recOn?await micStop():null;
+  if(tok.c){micDiscard();return;}
+  micDiscard();
+  if(take)mic.url=URL.createObjectURL(take);
+  setStep("listen","Listen again",take?"the model first…":"how close were you?");
   await playClip(s,tok);if(tok.c)return;
+  if(mic.url){
+    setStep("listen","…now you","spot the differences");
+    await wait(250,tok);if(tok.c)return;
+    await playTake(tok);if(tok.c)return;}
   setStep("write","Write the line","from memory — reveal when done");
   $("#padZone").hidden=false;initPad($("#padCanvas"));
   await new Promise(res=>{const b=$("#padReveal");if(!b)return res();
@@ -595,12 +649,23 @@ async function runFlow(s){
   showSentence(s,cfg.furigana);
   setStep("check","Check your writing","compare, then stamp yourself");
   $("#markZone").hidden=false;
+  const oldCmp=$("#cmpRow");if(oldCmp)oldCmp.remove();
+  if(mic.url){
+    const row=document.createElement("div");
+    row.id="cmpRow";row.className="btnrow";row.style.justifyContent="center";
+    row.innerHTML=`<button class="btn small ghost" id="cmpModel">🔊 手本</button>
+      <button class="btn small ghost" id="cmpMe">🎙 自分</button>`;
+    $("#markZone").before(row);
+    $("#cmpModel").onclick=async()=>{try{audioEl.src=await clipUrl(s.clip);
+      audioEl.currentTime=0;audioEl.playbackRate=cfg.rate;audioEl.play().catch(()=>{});}catch(_){}};
+    $("#cmpMe").onclick=()=>{recEl.src=mic.url;recEl.currentTime=0;recEl.play().catch(()=>{});};}
   const ok=await new Promise(res=>{
     $("#markOk").onclick=()=>res(true);$("#markNo").onclick=()=>res(false);
     const iv=setInterval(()=>{if(tok.c){clearInterval(iv);res(null);}},150);});
   if(tok.c||ok===null)return;
   P.marks[`${todayStr()}|${s.id}`]=ok;saveProgress();
   addPoints(ok?2:1);stamp(ok);(ok?sfxGood:sfxBad)();
+  micDiscard();const cr=$("#cmpRow");if(cr)cr.remove();
   await wait(650,tok);if(tok.c)return;
   nextSentence();}
 
@@ -615,6 +680,7 @@ function nextSentence(){
   else finishSentences();}
 
 function finishSentences(){
+  micRelease();
   const ss=app.session;
   if(ss.mode==="scheduled"){
     P.doneMap[doneKey(ss.page,ss.ev)]={on:todayStr()};
@@ -738,6 +804,9 @@ function renderSettings(v){
       <input type="checkbox" id="cShow" ${cfg.showTextDuring?"checked":""}></label>
     <label class="field">Furigana on reveal
       <input type="checkbox" id="cFuri" ${cfg.furigana?"checked":""}></label>
+    <label class="field">Record my voice in the speak step
+      <input type="checkbox" id="cRec" ${cfg.recordSpeak?"checked":""}></label>
+    <div style="font-size:11px;color:var(--ink2)">played back once to compare with the narrator, then discarded — never saved</div>
   </div>
   <h2 class="sect">Games</h2>
   <div class="card" id="gameToggles">
@@ -766,6 +835,8 @@ function renderSettings(v){
   $("#cBeep").oninput=e=>{cfg.beepDelay=+e.target.value;$("#vBeep").textContent=cfg.beepDelay+"s";save();};
   $("#cShow").onchange=e=>{cfg.showTextDuring=e.target.checked;save();};
   $("#cFuri").onchange=e=>{cfg.furigana=e.target.checked;save();};
+  $("#cRec").onchange=e=>{cfg.recordSpeak=e.target.checked;save();
+    if(!e.target.checked)micRelease();};
   v.querySelectorAll("[data-g]").forEach(t=>t.onchange=e=>{
     cfg.games[t.dataset.g]=e.target.checked;save();});
   v.querySelectorAll("[data-gs]").forEach(t=>t.oninput=e=>{
