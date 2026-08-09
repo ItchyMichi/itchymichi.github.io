@@ -237,7 +237,7 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09f";
+const BUILD="2026-08-09g";
 const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
   recordSpeak:false,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
@@ -724,17 +724,26 @@ function initPad(canvas){
   canvas.width=w*dpr;canvas.height=h*dpr;
   const g=canvas.getContext("2d");g.scale(dpr,dpr);
   g.lineCap="round";g.lineJoin="round";
-  pad={canvas,g,strokes:[],cur:null,w,h};
+  pad={canvas,g,strokes:[],cur:null,w,h,pid:null,penSeen:false};
   const pos=e=>{const r=canvas.getBoundingClientRect();
     return [e.clientX-r.left,e.clientY-r.top,e.pressure&&e.pressure>0?e.pressure:0.5];};
   canvas.addEventListener("pointerdown",e=>{e.preventDefault();
+    // palm rejection: once a pen has drawn here, fingers can't
+    if(pad.penSeen&&e.pointerType==="touch")return;
+    if(e.pointerType==="pen"){
+      pad.penSeen=true;
+      if(pad.cur&&pad.pid!=null){pad.strokes.pop();pad.cur=null;}  // palm scribble
+      pad.pid=null;}
+    if(pad.pid!=null)return;                 // one pointer draws at a time
+    pad.pid=e.pointerId;
     canvas.setPointerCapture(e.pointerId);
     pad.cur={pts:[pos(e)]};pad.strokes.push(pad.cur);drawPad();});
-  canvas.addEventListener("pointermove",e=>{if(!pad.cur)return;
+  canvas.addEventListener("pointermove",e=>{
+    if(!pad.cur||e.pointerId!==pad.pid)return;
     for(const ev of (e.getCoalescedEvents?e.getCoalescedEvents():[e]))
       pad.cur.pts.push(pos(ev));
     drawPad();});
-  const up=()=>{pad.cur=null;};
+  const up=e=>{if(e.pointerId!==pad.pid)return;pad.cur=null;pad.pid=null;};
   canvas.addEventListener("pointerup",up);canvas.addEventListener("pointercancel",up);
   $("#padUndo").onclick=()=>{pad.strokes.pop();drawPad();};
   $("#padClear").onclick=()=>padClear();}
@@ -1474,11 +1483,22 @@ const gameWrite={title:"Writing practice",icon:"筆",blurb:"stroke order · trac
       for(const st of strokes)for(let i=1;i<st.length;i++)seg(st[i-1],st[i]);};
     const pt=e=>{const r=padC.getBoundingClientRect();
       return{x:e.clientX-r.left,y:e.clientY-r.top,p:e.pressure||0.55};};
-    padC.onpointerdown=e=>{e.preventDefault();padC.setPointerCapture(e.pointerId);
+    let drawId=null,penSeen=false;
+    padC.onpointerdown=e=>{e.preventDefault();
+      if(penSeen&&e.pointerType==="touch")return;
+      if(e.pointerType==="pen"){
+        penSeen=true;
+        if(cur&&drawId!=null){strokes.pop();cur=null;redraw();}
+        drawId=null;}
+      if(drawId!=null)return;
+      drawId=e.pointerId;padC.setPointerCapture(e.pointerId);
       cur=[pt(e)];strokes.push(cur);};
-    padC.onpointermove=e=>{if(!cur)return;const q=pt(e);
-      seg(cur[cur.length-1],q);cur.push(q);};
-    padC.onpointerup=padC.onpointercancel=()=>{cur=null;};
+    padC.onpointermove=e=>{
+      if(!cur||e.pointerId!==drawId)return;
+      for(const ev of (e.getCoalescedEvents?e.getCoalescedEvents():[e])){
+        const q=pt(ev);seg(cur[cur.length-1],q);cur.push(q);}};
+    padC.onpointerup=padC.onpointercancel=e=>{
+      if(e.pointerId!==drawId)return;cur=null;drawId=null;};
     const stageDemo=()=>{
       if(stage===0){demo.innerHTML=svgFor(k,{color:true,width:4});animate(demo);}
       else if(stage===1){animTok++;demo.innerHTML=svgFor(k,{color:true,nums:true,width:3.6});}
