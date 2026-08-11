@@ -195,6 +195,12 @@ canvas.gcanvas{display:block; width:100%; border:1px solid var(--line);
 .gstat{display:flex; justify-content:space-between; color:var(--ink2);
   font-size:13px; margin:8px 2px;}
 
+/* ---------- furigana toggle ---------- */
+body.nofuri rt{display:none;}
+body.nofuri .sub{display:none !important;}
+.furib{font-family:var(--serif);}
+.furib.on{background:var(--indigo); color:#fff;}
+
 /* ---------- misc ---------- */
 .toast{position:fixed; left:50%; transform:translateX(-50%); bottom:90px;
   background:var(--ink); color:var(--paper); padding:10px 18px; border-radius:99px;
@@ -239,18 +245,33 @@ const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.random(
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2200);}
 
 const app={deck:null,schedule:null,view:"today",sub:null,session:null,paused:false};
-const BUILD="2026-08-09o";
-const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:true,showTextDuring:false,
-  recordSpeak:false,walkRepeat:1,
+const BUILD="2026-08-10b";
+const DEFAULT_CFG={rate:1.0,beepDelay:4,repeats:2,furigana:false,showTextDuring:false,
+  recordSpeak:true,walkRepeat:1,chunkSize:3,dailyNew:2,
   games:{blanks:true,crystal:true,tileswap:true,cube:true,faces:true,write:true},
   gsize:{blanks:1,crystal:1,tileswap:1,cube:1,faces:1,write:1}};
 const gscale=id=>((cfg.gsize&&cfg.gsize[id])||1);
 let cfg={...DEFAULT_CFG};
-let P={doneMap:{},marks:{},points:{total:0,byDay:{}}};   // progress
+let P={doneMap:{},marks:{},points:{total:0,byDay:{}},sentDone:{},
+  lineIntro:{},pageIntro:{},revDone:{}};   // progress
 let saveT=null;
 function saveProgress(){clearTimeout(saveT);saveT=setTimeout(()=>kvSet("progress",P),300);}
 function addPoints(n){const d=todayStr();P.points.total+=n;P.points.byDay[d]=(P.points.byDay[d]||0)+n;saveProgress();paintPoints();}
 function paintPoints(){$("#pointsTop").textContent=P.points.total?`◈ ${P.points.total}`:"";}
+
+/* ------------------------------------------------- furigana visibility */
+// ruby markup is always rendered; this class simply hides the readings, so
+// the toggle works instantly on every screen (session, page, read, walk)
+function applyFuri(){
+  document.body.classList.toggle("nofuri",!cfg.furigana);
+  document.querySelectorAll(".furib").forEach(b=>{
+    b.classList.toggle("on",cfg.furigana);
+    b.title=cfg.furigana?"furigana on":"furigana off";});}
+const furiBtn=()=>`<button class="btn small quiet furib">ふ</button>`;
+document.addEventListener("click",e=>{
+  const b=e.target.closest(".furib");if(!b)return;
+  cfg.furigana=!cfg.furigana;kvSet("cfg",cfg);applyFuri();
+  const cb=$("#cFuri");if(cb)cb.checked=cfg.furigana;});
 
 /* ------------------------------------------------------------ IndexedDB */
 let _db=null;
@@ -416,6 +437,7 @@ async function importZip(file){
     app.strokes=strokes?strokes.strokes:null;
     await kvSet("deck",deck);if(sch)await kvSet("schedule",sch);
     await kvSet("strokes",app.strokes);
+    migrateSchedule();
     try{await navigator.storage?.persist?.();}catch(_){}
     say("Done",1);toast(`Imported: ${deck.media.title}`);
   }catch(err){alert("Import failed: "+err.message);}
@@ -427,19 +449,125 @@ $("#zipInput").addEventListener("change",e=>{
 function todayStr(){const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
 const doneKey=(page,ev)=>`${app.deck.media.id}|${page}|${ev.date}|${ev.type}${ev.n||""}`;
+
+/* --------------------------------------------- line-based daily plan --
+   pacing no longer comes from the exporter's page dates. Instead:
+   · NEW: the next `cfg.dailyNew` un-studied lines each day, in book order
+   · REVIEWS: anchored to the day a page's LAST line was actually studied,
+     using the intervals from the imported schedule (default +1,+3,+7,+14)
+   P.lineIntro[media|sid]=date, P.pageIntro[media|page]=date,
+   P.revDone[media|page|k]=date */
+const LK=sid=>`${app.deck.media.id}|${sid}`;
+const PK=pg=>`${app.deck.media.id}|${pg}`;
+const pad3=n=>String(n).padStart(3,"0");
+function addDays(dstr,n){const d=new Date(dstr+"T12:00:00");
+  d.setDate(d.getDate()+n);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
+const fmtDue=d=>d<=todayStr()?"today":d===addDays(todayStr(),1)?"tomorrow":"on "+d;
+const schedIntervals=()=>
+  (app.schedule&&app.schedule.params&&app.schedule.params.intervals)||[1,3,7,14];
+const schedHolidays=()=>
+  new Set((app.schedule&&app.schedule.params&&app.schedule.params.holidays)||[]);
+function nextOkDate(d,hol){while(hol.has(d))d=addDays(d,1);return d;}
+function introducedToday(){
+  const t=todayStr(),m=app.deck.media.id+"|";let n=0;
+  for(const k in (P.lineIntro||{}))if(k.startsWith(m)&&P.lineIntro[k]===t)n++;
+  return n;}
+function newQuota(){return Math.max(0,(cfg.dailyNew||2)-introducedToday());}
+function pageUndone(rec){                    // un-studied lines of a page
+  return (rec?rec.sentence_ids:[])
+    .filter(sid=>!(P.lineIntro||{})[LK(sid)]).map(S).filter(Boolean);}
+function firstUndonePage(){
+  for(const p of app.deck.pages)if(pageUndone(p).length)return p;
+  return null;}
+function reviewDue(pg,k){                    // due date of review k for a page
+  const intro=(P.pageIntro||{})[PK(pg)];
+  return intro?nextOkDate(addDays(intro,schedIntervals()[k-1]),schedHolidays()):null;}
+
 function dueEvents(){
-  if(!app.deck||!app.schedule)return[];
+  if(!app.deck)return[];
   const t=todayStr(),out=[];
-  for(const e of app.schedule.entries){
-    const evs=[{type:"intro",date:e.intro},
-      ...e.reviews.map((d,i)=>({type:"review",n:i+1,date:d}))];
-    for(const ev of evs)
-      if(ev.date<=t&&!P.doneMap[doneKey(e.page,ev)])
-        out.push({page:e.page,kanji:e.kanji,overdue:ev.date<t,...ev});}
+  const ivs=schedIntervals();
+  for(const p of app.deck.pages){        // earliest pending review per page
+    if(!(P.pageIntro||{})[PK(p.n)])continue;
+    for(let k=1;k<=ivs.length;k++){
+      if((P.revDone||{})[`${PK(p.n)}|${k}`])continue;
+      const due=reviewDue(p.n,k);
+      if(due<=t)out.push({page:p.n,kanji:p.practice_kanji,type:"review",n:k,
+        date:due,overdue:due<t});
+      break;}}
   out.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:a.page-b.page);
+  let quota=newQuota();                  // new lines, book order, up to target
+  for(const p of app.deck.pages){
+    if(quota<=0)break;
+    const undone=pageUndone(p);
+    if(!undone.length)continue;
+    const take=Math.min(quota,undone.length);
+    out.push({page:p.n,kanji:p.practice_kanji,type:"intro",date:t,take});
+    quota-=take;}
   return out;}
+
+/* one-time migration of pages/reviews completed under the old
+   page-per-day scheme, so their review clocks carry over correctly */
+function migrateSchedule(){
+  if(!app.deck)return;
+  const m=app.deck.media.id;
+  P.lineIntro=P.lineIntro||{};P.pageIntro=P.pageIntro||{};P.revDone=P.revDone||{};
+  P._schedV2=P._schedV2||{};
+  if(P._schedV2[m])return;
+  for(const e of (app.schedule?app.schedule.entries:null)||[]){
+    const rec=pageRec(e.page);
+    const ki=`${m}|${e.page}|${e.intro}|intro`;
+    if(P.doneMap[ki]){
+      const on=(P.doneMap[ki]&&P.doneMap[ki].on)||e.intro;
+      if(!P.pageIntro[`${m}|${e.page}`])P.pageIntro[`${m}|${e.page}`]=on;
+      if(rec)for(const sid of rec.sentence_ids)
+        if(!P.lineIntro[`${m}|${sid}`])P.lineIntro[`${m}|${sid}`]=on;}
+    e.reviews.forEach((d,i)=>{
+      const kr=`${m}|${e.page}|${d}|review${i+1}`;
+      if(P.doneMap[kr])
+        P.revDone[`${m}|${e.page}|${i+1}`]=(P.doneMap[kr]&&P.doneMap[kr].on)||d;});}
+  for(const k of Object.keys(P.sentDone||{})){   // half-done intro parts
+    const ps=k.split("|");
+    if(ps[0]!==m||!(ps[3]||"").startsWith("intro"))continue;
+    for(const sid of Object.keys(P.sentDone[k]))
+      if(!P.lineIntro[`${m}|${sid}`])P.lineIntro[`${m}|${sid}`]=todayStr();
+    delete P.sentDone[k];}
+  P._schedV2[m]=true;
+  saveProgress();}
 const pageRec=n=>app.deck.pages.find(p=>p.n===n);
 const S=id=>app.deck.sentences.find(s=>s.id===id);
+
+/* ------------------------------------------------ study parts (chunks) */
+// a page is studied a few lines at a time. NEW lines track lifetime progress
+// (P.lineIntro) and are capped by today's remaining target; review/free parts
+// track per-event progress in P.sentDone[eventKey]
+const chunkN=()=>Math.max(1,cfg.chunkSize||3);
+function chunkInfo(ev){
+  const rec=pageRec(ev.page);
+  const all=(rec?rec.sentence_ids:[]).map(S).filter(Boolean);
+  const n=chunkN();
+  let remaining,key=null;
+  if(ev.type==="intro"){
+    remaining=all.filter(s=>!(P.lineIntro||{})[LK(s.id)]);}
+  else{
+    key=doneKey(ev.page,ev);
+    const dm=(P.sentDone||{})[key]||{};
+    remaining=all.filter(s=>!dm[s.id]);}
+  const done=all.length-remaining.length;
+  const cap=(ev.type==="intro"&&!ev.extra)?Math.min(n,newQuota()):n;
+  const queue=remaining.slice(0,Math.max(0,cap));
+  const pool=(ev.kanji&&ev.kanji.length?ev.kanji:(rec?rec.practice_kanji:[]))||[];
+  const inPart=new Set(queue.flatMap(s=>s.kanji||[]));
+  const anywhere=new Set(all.flatMap(s=>s.kanji||[]));
+  const lastPart=remaining.length<=queue.length;
+  // this part's kanji = page kanji that occur in these lines; kanji that occur
+  // in none of the page's lines are appended to the final part so nothing is lost
+  const kanji=pool.filter(k=>inPart.has(k)||(lastPart&&!anywhere.has(k)));
+  return {key,total:all.length,done,queue,kanji,lastPart,
+    remaining:remaining.length,
+    partNum:Math.floor(done/n)+1,
+    partTotal:Math.max(1,Math.ceil(all.length/n))};}
 
 /* ---------------------------------------------------------------- router */
 function setView(v,sub=null){app.view=v;app.sub=sub;render();}
@@ -452,7 +580,8 @@ function render(){
   const v=$("#view");v.scrollTop=0;
   ({today:renderToday,session:renderSession,library:renderLibrary,read:renderRead,walk:renderWalk,walkplay:renderWalkPlayer,
     page:renderPage,games:renderGames,game:renderGameRun,
-    settings:renderSettings}[app.view]||renderToday)(v);}
+    settings:renderSettings}[app.view]||renderToday)(v);
+  applyFuri();}
 document.querySelectorAll("#tabbar button").forEach(b=>
   b.addEventListener("click",()=>setView(b.dataset.v)));
 
@@ -467,26 +596,48 @@ function renderToday(v){
     $("#heroImport").onclick=()=>$("#zipInput").click();return;}
   const due=dueEvents();
   const today=todayStr();
-  let html=`<h2 class="sect">${today} · ${due.length?due.length+" due":"all done"}</h2>`;
+  const target=cfg.dailyNew||2,gotNew=introducedToday();
+  const ahead=firstUndonePage();
+  let html=`<h2 class="sect">${today} · 新 ${gotNew}/${target} new lines${
+    due.filter(e=>e.type==="review").length
+      ?` · ${due.filter(e=>e.type==="review").length} review${due.filter(e=>e.type==="review").length===1?"":"s"}`:""}</h2>`;
   if(!due.length)
-    html+=`<div class="card"><div class="row"><div style="font-family:var(--serif);font-size:30px">静</div>
-      <div>Nothing due today.<br><span style="color:var(--ink2);font-size:13px">
-      Practise ahead from the Library, or play games.</span></div></div></div>`;
+    html+=`<div class="card"><div class="row"><div style="font-family:var(--serif);font-size:30px">${ahead?"◎":"静"}</div>
+      <div style="flex:1">${ahead
+          ?`Today's target is met — ${gotNew} new line${gotNew===1?"":"s"}, no reviews due.`
+          :"Every line is studied and no reviews are due."}<br>
+        <span style="color:var(--ink2);font-size:13px">Games and the Library are always open${
+          ahead?", or squeeze in a few more lines":""}.</span></div>
+      ${ahead?`<button class="btn small ghost" id="aheadBtn">＋ more</button>`:""}</div></div>`;
   for(const [i,ev] of due.entries()){
     const badge=ev.type==="intro"?`<span class="badge new">NEW</span>`
       :`<span class="badge review">Review ${ev.n}</span>`;
     const od=ev.overdue?` <span class="badge overdue">from ${ev.date}</span>`:"";
-    const rec=pageRec(ev.page);
+    const info=chunkInfo(ev);
+    const meta=info.total
+      ?`next: ${info.queue.length} line${info.queue.length===1?"":"s"} · ${info.kanji.length} kanji`
+        +(info.done?` · ${info.done}/${info.total} lines done`:` · ${info.total} lines in all`)
+      :`${ev.kanji.length} kanji`;
+    const chips=info.kanji.length?info.kanji:ev.kanji;   // next part's kanji
     html+=`<div class="card"><div class="row">
-      <div style="font-family:var(--serif);font-size:22px">p${String(ev.page).padStart(3,"0")}</div>
+      <div style="font-family:var(--serif);font-size:22px">p${pad3(ev.page)}</div>
       <div style="flex:1">${badge}${od}
-        <div style="color:var(--ink2);font-size:12px;margin-top:2px">
-        ${rec?rec.sentence_ids.length:0} lines · ${ev.kanji.length} kanji</div></div>
-      <button class="btn small" data-start="${i}">Start</button></div>
-      <div class="kchips">${ev.kanji.slice(0,10).map(k=>`<span>${k}</span>`).join("")}</div></div>`;}
+        <div style="color:var(--ink2);font-size:12px;margin-top:2px">${meta}</div></div>
+      <button class="btn small" data-start="${i}">${info.done?"Continue":"Start"}</button></div>
+      <div class="kchips">${chips.slice(0,10).map(k=>`<span>${k}</span>`).join("")}</div></div>`;}
+  if(due.length&&!due.some(e=>e.type==="intro")&&ahead)
+    html+=`<div class="card"><div class="row">
+      <div style="font-family:var(--serif);font-size:22px">◎</div>
+      <div style="flex:1;color:var(--ink2);font-size:13px">New-line target met for today
+        — next is p${pad3(ahead.n)} tomorrow.</div>
+      <button class="btn small ghost" id="aheadBtn">＋ more</button></div></div>`;
   v.innerHTML=html;
   v.querySelectorAll("[data-start]").forEach(b=>
-    b.onclick=()=>startSession(due[+b.dataset.start],"scheduled"));}
+    b.onclick=()=>startSession(due[+b.dataset.start],"scheduled"));
+  const ab=$("#aheadBtn");
+  if(ab)ab.onclick=()=>{const p=firstUndonePage();if(!p)return;
+    startSession({page:p.n,kanji:p.practice_kanji,type:"intro",
+      date:todayStr(),extra:true},"scheduled");};}
 /*SCRIPT-CONT*/
 
 /* ================================================================ audio */
@@ -553,6 +704,25 @@ async function playTake(tok){
     else if(!app.paused&&recEl.paused&&!recEl.ended)recEl.play().catch(()=>{});
     if(recEl.ended){clearInterval(iv);res();}},100);});}
 
+/* replay buttons for the write/check steps — the model line can always be
+   replayed; the own-voice button appears whenever a take was recorded */
+function replayRow(s){
+  const old=$("#cmpRow");if(old)old.remove();
+  const zone=$("#markZone");if(!zone)return;
+  const row=document.createElement("div");
+  row.id="cmpRow";row.className="btnrow";row.style.justifyContent="center";
+  row.innerHTML=`${s.clip?`<button class="btn small ghost" id="cmpModel">🔊 手本</button>`:""}
+    ${mic.url?`<button class="btn small ghost" id="cmpMe">🎙 自分</button>`:""}`;
+  zone.before(row);
+  const md=$("#cmpModel");
+  if(md)md.onclick=async()=>{try{recEl.pause();
+    audioEl.src=await clipUrl(s.clip);
+    audioEl.currentTime=0;audioEl.playbackRate=cfg.rate;
+    audioEl.play().catch(()=>{});}catch(_){}};
+  const me=$("#cmpMe");
+  if(me)me.onclick=()=>{audioEl.pause();
+    recEl.src=mic.url;recEl.currentTime=0;recEl.play().catch(()=>{});};}
+
 const urlCache=new Map();
 async function clipUrl(path){
   if(urlCache.has(path)){const u=urlCache.get(path);urlCache.delete(path);urlCache.set(path,u);return u;}
@@ -598,12 +768,15 @@ function cancelFlow(){if(flowTok)flowTok.c=true;flowTok=null;micRelease();
   audioEl.pause();recEl.pause();app.paused=false;}
 
 function startSession(ev,mode){
-  const rec=pageRec(ev.page);
-  const sents=(rec?rec.sentence_ids:[]).map(S).filter(Boolean);
+  let info=chunkInfo(ev);
+  if(ev.type==="free"&&info.total&&!info.queue.length){
+    // free practice of an already-finished page: start over
+    if(P.sentDone)delete P.sentDone[info.key];
+    saveProgress();info=chunkInfo(ev);}
+  if(!info.queue.length){toast("nothing to study here right now");return;}
   unlockAudio();
-  app.session={ev,mode,page:ev.page,queue:sents,idx:0,marks:{},
-    kanji:ev.kanji&&ev.kanji.length?ev.kanji:(rec?rec.practice_kanji:[])};
-  if(!sents.length){finishSentences();return;}
+  app.session={ev,mode,page:ev.page,queue:info.queue,idx:0,marks:{},
+    kanji:info.kanji,info};
   setView("session");}
 
 function renderSession(v){
@@ -612,6 +785,7 @@ function renderSession(v){
   v.innerHTML=`<div class="sess-top">
       <button class="btn small quiet" id="sessQuit">✕</button>
       <div class="prog" id="sessProg"></div>
+      ${furiBtn()}
       <button class="btn small quiet" id="sessPause">⏸</button></div>
     <div class="stage">
       <div class="stepname" id="stepName"></div>
@@ -645,11 +819,10 @@ function setStep(kind,name,hint){
   orb.textContent={listen:"聴",ready:"…",speak:"話",write:"書",check:"検"}[kind]||"聴";
   $("#stepName").textContent=name||"";$("#stepHint").textContent=hint||"";}
 
-function showSentence(s,withFuri){
+function showSentence(s){
   const box=$("#sentBox");if(!box)return;
-  const r=rubyParts(s);
-  box.innerHTML=(withFuri?r.ruby:r.plain)+
-    (withFuri&&r.sub?`<span class="sub">${r.sub}</span>`:"");
+  const r=rubyParts(s);   // readings always in the markup; body.nofuri hides them
+  box.innerHTML=r.ruby+(r.sub?`<span class="sub">${r.sub}</span>`:"");
   box.hidden=false;}
 function rubyParts(s){
   const plain=esc(s.text);
@@ -662,15 +835,18 @@ function rubyParts(s){
 
 function runCurrent(){
   const ss=app.session,s=ss.queue[ss.idx];
-  $("#sessProg").textContent=`p${String(ss.page).padStart(3,"0")} · line ${ss.idx+1} / ${ss.queue.length}`;
+  const info=ss.info||{done:0,total:ss.queue.length,partNum:1,partTotal:1};
+  $("#sessProg").textContent=
+    `p${String(ss.page).padStart(3,"0")} · part ${info.partNum}/${info.partTotal} · line ${info.done+ss.idx+1}/${info.total}`;
   $("#sentBox").hidden=true;$("#padZone").hidden=true;$("#markZone").hidden=true;
+  const oc=$("#cmpRow");if(oc)oc.remove();
   padClear();
   runFlow(s);}
 
 async function runFlow(s){
   const tok={c:false};flowTok=tok;
   const dur=(s.end!=null&&s.start!=null)?Math.max(0.8,s.end-s.start):2.5;
-  if(cfg.showTextDuring)showSentence(s,cfg.furigana);
+  if(cfg.showTextDuring)showSentence(s);
   for(let i=1;i<=cfg.repeats;i++){
     setStep("listen",`Listen ${"①②③④"[i-1]??i}`,"just listen");
     await playClip(s,tok);if(tok.c)return;
@@ -693,22 +869,13 @@ async function runFlow(s){
     await playTake(tok);if(tok.c)return;}
   setStep("write","Write the line","from memory — reveal when done");
   $("#padZone").hidden=false;initPad($("#padCanvas"));
+  replayRow(s);          // 🔊 model (always) + 🎙 own take, write step onward
   await new Promise(res=>{const b=$("#padReveal");if(!b)return res();
     b.onclick=res;const iv=setInterval(()=>{if(tok.c){clearInterval(iv);res();}},150);});
   if(tok.c)return;
-  showSentence(s,cfg.furigana);
+  showSentence(s);
   setStep("check","Check your writing","compare, then stamp yourself");
   $("#markZone").hidden=false;
-  const oldCmp=$("#cmpRow");if(oldCmp)oldCmp.remove();
-  if(mic.url){
-    const row=document.createElement("div");
-    row.id="cmpRow";row.className="btnrow";row.style.justifyContent="center";
-    row.innerHTML=`<button class="btn small ghost" id="cmpModel">🔊 手本</button>
-      <button class="btn small ghost" id="cmpMe">🎙 自分</button>`;
-    $("#markZone").before(row);
-    $("#cmpModel").onclick=async()=>{try{audioEl.src=await clipUrl(s.clip);
-      audioEl.currentTime=0;audioEl.playbackRate=cfg.rate;audioEl.play().catch(()=>{});}catch(_){}};
-    $("#cmpMe").onclick=()=>{recEl.src=mic.url;recEl.currentTime=0;recEl.play().catch(()=>{});};}
   const ok=await new Promise(res=>{
     $("#markOk").onclick=()=>res(true);$("#markNo").onclick=()=>res(false);
     const iv=setInterval(()=>{if(tok.c){clearInterval(iv);res(null);}},150);});
@@ -731,21 +898,82 @@ function nextSentence(){
 
 function finishSentences(){
   micRelease();
-  const ss=app.session;
-  if(ss.mode==="scheduled"){
-    P.doneMap[doneKey(ss.page,ss.ev)]={on:todayStr()};
-    addPoints(5);saveProgress();}
+  const ss=app.session,ev=ss.ev,t=todayStr();
+  const rec=pageRec(ss.page);
+  const ivs=schedIntervals();
+  let done=false;                            // this card fully finished?
+  if(ev.type==="intro"){
+    P.lineIntro=P.lineIntro||{};             // new lines: lifetime log
+    for(const s of ss.queue)P.lineIntro[LK(s.id)]=t;
+    if(!pageUndone(rec).length&&!(P.pageIntro||{})[PK(ss.page)]){
+      P.pageIntro=P.pageIntro||{};
+      P.pageIntro[PK(ss.page)]=t;            // review clock starts today
+      done=true;addPoints(5);}
+    else if(ss.queue.length)addPoints(2);}
+  else{                                      // review / free: per-event log
+    const key=doneKey(ss.page,ev);
+    if(ss.queue.length){P.sentDone=P.sentDone||{};
+      const m=P.sentDone[key]=P.sentDone[key]||{};
+      for(const s of ss.queue)m[s.id]=true;}
+    if(!chunkInfo(ev).queue.length){
+      done=true;
+      if(P.sentDone)delete P.sentDone[key];
+      if(ev.type==="review"){
+        P.revDone=P.revDone||{};
+        P.revDone[`${PK(ss.page)}|${ev.n}`]=t;addPoints(5);}}
+    else if(ss.queue.length)addPoints(2);}
+  saveProgress();
+  /* ---- completion screen ---- */
   const v=$("#view");
-  const marks=Object.entries(ss.marks).length;
-  v.innerHTML=`<div class="hero"><div class="glyph" style="color:var(--shu)">了</div>
-    <h2>Page ${ss.page} done</h2>
-    <p>${ss.queue.length} lines practised.${ss.mode==="scheduled"?" Logged to today's schedule.":""}</p>
-    <div class="btnrow" style="justify-content:center">
-      ${ss.kanji.length?`<button class="btn" id="toGames">Kanji games (${ss.kanji.length})</button>`:""}
-      <button class="btn ghost" id="toToday">Today</button></div></div>`;
+  let glyph="続",gcol="var(--indigo)",head="",sub="",btns=[];
+  const nextIntro=ev.type==="intro"?dueEvents().find(e=>e.type==="intro"):null;
+  const ahead=ev.type==="intro"?firstUndonePage():null;
+  if(ev.type==="intro"){
+    const pageDone=rec?rec.sentence_ids.length-pageUndone(rec).length:0;
+    if(done){glyph="了";gcol="var(--shu)";
+      head=`Page ${ss.page} finished`;
+      sub=`all ${ss.info.total} lines studied · review 1 ${fmtDue(reviewDue(ss.page,1)||addDays(t,ivs[0]))}`;}
+    else{head=`Part done · ${pageDone}/${ss.info.total} lines`;
+      sub=`${ss.queue.length} new line${ss.queue.length===1?"":"s"} studied.`;}
+    if(nextIntro){
+      const ni=chunkInfo(nextIntro);
+      sub+=` Next: ${ni.queue.length} line${ni.queue.length===1?"":"s"}${
+        nextIntro.page!==ss.page?` on p${pad3(nextIntro.page)}`:""}.`;
+      btns.push(`<button class="btn" id="goNext">${
+        nextIntro.page===ss.page?"Next part":"Next: p"+pad3(nextIntro.page)} ▶</button>`);}
+    else if(ahead){
+      if(!done){glyph="◎";gcol="var(--ok)";head="Daily target reached";}
+      sub+=` Target of ${cfg.dailyNew} met ◎ — p${pad3(ahead.n)} continues tomorrow.`;
+      btns.push(`<button class="btn ghost" id="goExtra">＋ keep going</button>`);}
+    else sub+=" Every line of the book is studied 卒";}
+  else{
+    const after=chunkInfo(ev);
+    const what=ev.type==="review"?`Review ${ev.n} · p${pad3(ss.page)}`:`p${pad3(ss.page)}`;
+    if(done){glyph="了";gcol="var(--shu)";
+      head=ev.type==="review"?`Review ${ev.n} of page ${ss.page} done`
+                             :`Page ${ss.page} practised`;
+      sub=ev.type==="review"
+        ?(ev.n<ivs.length?`review ${ev.n+1} ${fmtDue(reviewDue(ss.page,ev.n+1))}`
+                         :"that page is fully reviewed 卒")
+        :`${ss.info.total} lines.`;}
+    else{head=`${what} · ${after.done}/${after.total} lines`;
+      sub=`Next part: ${after.queue.length} line${after.queue.length===1?"":"s"}.`;
+      btns.push(`<button class="btn" id="goNext">Next part ▶</button>`);}}
+  if(ss.kanji.length)
+    btns.push(`<button class="btn ghost" id="toGames">Kanji games (${ss.kanji.length})</button>`);
+  btns.push(`<button class="btn quiet" id="toToday">${ev.type==="free"?"Back to page":"Today"}</button>`);
+  v.innerHTML=`<div class="hero"><div class="glyph" style="color:${gcol}">${glyph}</div>
+    <h2>${head}</h2><p>${sub}</p>
+    <div class="btnrow" style="justify-content:center">${btns.join("")}</div></div>`;
+  const gn=$("#goNext");
+  if(gn)gn.onclick=()=>startSession(ev.type==="intro"?nextIntro:ev,ss.mode);
+  const gx=$("#goExtra");
+  if(gx)gx.onclick=()=>{const p=firstUndonePage();if(!p)return;
+    startSession({page:p.n,kanji:p.practice_kanji,type:"intro",date:t,extra:true},"scheduled");};
   const g=$("#toGames");
   if(g)g.onclick=()=>{app.gameKanji=ss.kanji.slice();app.session=null;setView("games");};
-  $("#toToday").onclick=()=>{app.session=null;setView("today");};}
+  $("#toToday").onclick=()=>{app.session=null;
+    setView(ev.type==="free"?"page":"today",ev.type==="free"?ss.page:null);};}
 
 /* ------------------------- pen mode: palm can't scroll or click ---------- */
 const penPads=new Set();          // canvases where a pen has drawn
@@ -764,15 +992,31 @@ document.addEventListener("pointerdown",e=>{
 
 /* ------------------------------------------------------------ writing pad */
 let pad=null;
-function initPad(canvas){
-  if(!canvas)return;
+function padSize(){
+  // buffer, context scale AND the element's displayed height must agree —
+  // when they don't (iPad: 430px buffer shown in the stylesheet's 300px box)
+  // strokes land visibly above the touch point
+  if(!pad)return;
+  const canvas=pad.canvas;
   const dpr=Math.min(2,window.devicePixelRatio||1);
   const w=canvas.clientWidth||340,
     h=Math.min(430,Math.max(300,Math.round(innerHeight*0.42)));
   canvas.width=w*dpr;canvas.height=h*dpr;
-  const g=canvas.getContext("2d");g.scale(dpr,dpr);
+  canvas.style.height=h+"px";
+  const g=canvas.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0);
   g.lineCap="round";g.lineJoin="round";
-  pad={canvas,g,strokes:[],cur:null,w,h,pid:null,penSeen:false};
+  pad.g=g;pad.w=w;pad.h=h;}
+window.addEventListener("resize",()=>{      // iPad rotation etc.
+  if(!pad||!pad.canvas||!pad.canvas.isConnected)return;
+  clearTimeout(pad._rz);
+  pad._rz=setTimeout(()=>{
+    if(!pad||!pad.canvas.isConnected)return;
+    padSize();drawPad();},120);});
+function initPad(canvas){
+  if(!canvas)return;
+  pad={canvas,g:null,strokes:[],cur:null,w:0,h:0,pid:null,penSeen:false};
+  padSize();
   const pos=e=>{const r=canvas.getBoundingClientRect();
     return [e.clientX-r.left,e.clientY-r.top,e.pressure&&e.pressure>0?e.pressure:0.5];};
   canvas.addEventListener("pointerdown",e=>{e.preventDefault();
@@ -784,7 +1028,7 @@ function initPad(canvas){
       pad.pid=null;}
     if(pad.pid!=null)return;                 // one pointer draws at a time
     pad.pid=e.pointerId;
-    canvas.setPointerCapture(e.pointerId);
+    try{canvas.setPointerCapture(e.pointerId);}catch(_){}
     pad.cur={pts:[pos(e)]};pad.strokes.push(pad.cur);drawPad();});
   canvas.addEventListener("pointermove",e=>{
     if(!pad.cur||e.pointerId!==pad.pid)return;
@@ -829,10 +1073,14 @@ function renderLibrary(v){
 function renderPage(v){
   const n=app.sub,r=pageRec(n);
   if(!r){setView("library");return;}
+  const fev={page:n,type:"free",date:todayStr(),kanji:r.practice_kanji};
+  const finfo=chunkInfo(fev);
   let html=`<div class="sess-top">
     <button class="btn small quiet" id="backLib">‹ Library</button>
     <div class="prog">p${String(n).padStart(3,"0")} · ${esc(r.chapter)}</div>
-    <button class="btn small" id="freePractice">Practise</button>
+    ${furiBtn()}
+    <button class="btn small" id="freePractice">Practise${
+      finfo.done&&finfo.queue.length?` ${finfo.done}/${finfo.total}`:""}</button>
     <button class="btn small ghost" id="readAlong">読む Read along</button></div>`;
   for(const sid of r.sentence_ids){
     const s=S(sid);if(!s)continue;
@@ -845,8 +1093,7 @@ function renderPage(v){
   v.innerHTML=html;
   $("#backLib").onclick=()=>setView("library");
   $("#readAlong").onclick=()=>setView("read",app.sub);
-  $("#freePractice").onclick=()=>startSession(
-    {page:n,type:"free",date:todayStr(),kanji:r.practice_kanji},"free");
+  $("#freePractice").onclick=()=>startSession(fev,"free");
   v.querySelectorAll("[data-sid]").forEach(b=>b.onclick=async()=>{
     unlockAudio();loopSid=null;cancelFlow();
     const s=S(b.dataset.sid);await playClip(s,{c:false});});
@@ -915,6 +1162,7 @@ function renderRead(v){
       <button class="btn small ghost" id="rB5">↺5</button>
       <button class="btn" id="rPlay">▶</button>
       <button class="btn small ghost" id="rNext">⏭</button>
+      ${furiBtn()}
     </div>
     <div class="rwrap" id="rText"></div>`;
   const wrap=v.querySelector("#rText");
@@ -1032,7 +1280,8 @@ function renderWalkPlayer(v){
       <button class="btn" id="wpPlay">▶</button>
       <button class="btn small ghost" id="wpF10">↻10</button>
       <button class="btn small ghost" id="wpNext">line ⏭</button>
-      <button class="btn small ghost" id="wpRep"></button></div>
+      <button class="btn small ghost" id="wpRep"></button>
+      ${furiBtn()}</div>
     <div class="fsent" id="wpLine" style="text-align:center;min-height:64px;
       font-size:22px;margin:6px 0 10px"></div>
     <div class="rwrap" id="wpList"></div>`;
@@ -1160,19 +1409,36 @@ function renderWalkPlayer(v){
 }
 
 function renderWalk(v){
-  if(!app.schedule||!app.schedule.entries?.length){
+  if(!app.deck){
     v.innerHTML=`<div class="hero"><div class="glyph">歩</div>
-      <p>No schedule yet — import a deck first.</p></div>`;return;}
+      <p>No deck yet — import one first.</p></div>`;return;}
   P.walk=P.walk||{};
-  const days={};   // date -> {nw:[pages], rv:[pages]}
-  for(const e of app.schedule.entries){
-    if(e.intro)(days[e.intro]=days[e.intro]||{nw:[],rv:[]}).nw.push(e.page);
-    for(const d of (e.reviews||[]))
-      (days[d]=days[d]||{nw:[],rv:[]}).rv.push(e.page);}
-  const today=todayStr();
-  const from=new Date(today);from.setDate(from.getDate()-7);
-  const dates=Object.keys(days).sort()
-    .filter(d=>d>=from.toISOString().slice(0,10)).slice(0,70);
+  const today=todayStr(),m=app.deck.media.id+"|";
+  // days come from what actually happened (lines studied, reviews done,
+  // pages ticked) plus today's live plan — not from exporter dates
+  const raw={};   // date -> {nw:Set, rv:Set}
+  const at=d=>raw[d]=raw[d]||{nw:new Set(),rv:new Set()};
+  for(const k in (P.lineIntro||{})){
+    if(!k.startsWith(m))continue;
+    const s=S(k.slice(m.length));
+    if(s)at(P.lineIntro[k]).nw.add(s.page);}
+  for(const k in (P.revDone||{})){
+    if(!k.startsWith(m))continue;
+    at(P.revDone[k]).rv.add(+k.split("|")[1]);}
+  for(const d in P.walk)
+    for(const pg in P.walk[d])at(d).nw.add(+pg);       // keep ticked history
+  for(const e of dueEvents())
+    (e.type==="intro"?at(today).nw:at(today).rv).add(e.page);
+  const from=addDays(today,-7);
+  const dates=Object.keys(raw).sort().filter(d=>d>=from&&d<=today);
+  const days={};
+  for(const d of dates)days[d]={
+    nw:[...raw[d].nw].sort((a,b)=>a-b),
+    rv:[...raw[d].rv].filter(p=>!raw[d].nw.has(p)).sort((a,b)=>a-b)};
+  if(!dates.length){
+    v.innerHTML=`<div class="hero"><div class="glyph">歩</div>
+      <p>Nothing here yet — study some lines first, then their pages
+      appear as walking listening.</p></div>`;return;}
   v.innerHTML=`<div class="gstat"><span>歩 walking listening</span>
       <span>tick pages as you listen</span></div>
     ${app.walkMeta
@@ -1236,6 +1502,19 @@ function renderWalk(v){
 function renderSettings(v){
   const est={usage:0,quota:0};
   v.innerHTML=`
+  <h2 class="sect">Daily plan</h2>
+  <div class="card">
+    <label class="field">New lines per day (target)
+      <input type="range" id="cDaily" min="1" max="15" step="1" value="${cfg.dailyNew||2}">
+      <span class="val" id="vDaily">${cfg.dailyNew||2}</span></label>
+    <label class="field">Lines per study part
+      <input type="range" id="cChunk" min="1" max="10" step="1" value="${chunkN()}">
+      <span class="val" id="vChunk">${chunkN()}</span></label>
+    <div style="font-size:11px;color:var(--ink2)">each day: the target's worth of new
+      lines in book order (reviews come on top), studied a part at a time with just
+      those lines' kanji. A page's reviews start when its last line is done:
+      +${schedIntervals().join(", +")} days.</div>
+  </div>
   <h2 class="sect">Listening flow</h2>
   <div class="card">
     <label class="field">Playback speed
@@ -1249,7 +1528,7 @@ function renderSettings(v){
       <span class="val" id="vBeep">${cfg.beepDelay}s</span></label>
     <label class="field">Show text while listening
       <input type="checkbox" id="cShow" ${cfg.showTextDuring?"checked":""}></label>
-    <label class="field">Furigana on reveal
+    <label class="field">Furigana (every screen · ふ button toggles too)
       <input type="checkbox" id="cFuri" ${cfg.furigana?"checked":""}></label>
     <label class="field">Record my voice in the speak step
       <input type="checkbox" id="cRec" ${cfg.recordSpeak?"checked":""}></label>
@@ -1280,8 +1559,10 @@ function renderSettings(v){
   $("#cRate").oninput=e=>{cfg.rate=+e.target.value;$("#vRate").textContent=cfg.rate.toFixed(2)+"×";save();};
   $("#cReps").oninput=e=>{cfg.repeats=+e.target.value;$("#vReps").textContent=cfg.repeats;save();};
   $("#cBeep").oninput=e=>{cfg.beepDelay=+e.target.value;$("#vBeep").textContent=cfg.beepDelay+"s";save();};
+  $("#cDaily").oninput=e=>{cfg.dailyNew=+e.target.value;$("#vDaily").textContent=cfg.dailyNew;save();};
+  $("#cChunk").oninput=e=>{cfg.chunkSize=+e.target.value;$("#vChunk").textContent=cfg.chunkSize;save();};
+  $("#cFuri").onchange=e=>{cfg.furigana=e.target.checked;save();applyFuri();};
   $("#cShow").onchange=e=>{cfg.showTextDuring=e.target.checked;save();};
-  $("#cFuri").onchange=e=>{cfg.furigana=e.target.checked;save();};
   $("#cRec").onchange=e=>{cfg.recordSpeak=e.target.checked;save();
     if(!e.target.checked)micRelease();};
   v.querySelectorAll("[data-g]").forEach(t=>t.onchange=e=>{
@@ -1295,7 +1576,8 @@ function renderSettings(v){
   $("#sWipe").onclick=async()=>{
     if(!confirm("Delete the deck, audio, schedule and all progress from this device?"))return;
     await wipeAll();app.deck=null;app.schedule=null;
-    P={doneMap:{},marks:{},points:{total:0,byDay:{}}};
+    P={doneMap:{},marks:{},points:{total:0,byDay:{}},sentDone:{},
+       lineIntro:{},pageIntro:{},revDone:{}};
     toast("All data deleted");setView("today");};
   navigator.storage?.estimate?.().then(e=>{
     $("#storageInfo").textContent=
@@ -1308,7 +1590,8 @@ function stopGame(){if(gameCleanup){try{gameCleanup();}catch(_){}gameCleanup=nul
 
 function defaultKanji(){
   const due=dueEvents();
-  const set=[...new Set(due.flatMap(e=>e.kanji))];
+  // the kanji of each due page's NEXT study part, not the whole page
+  const set=[...new Set(due.flatMap(e=>chunkInfo(e).kanji))];
   if(set.length)return set;
   return shuffle(Object.keys(app.deck?.kanji||{})).slice(0,8);}
 function gameCtx(){
@@ -1562,7 +1845,8 @@ const gameCube={title:"Kanji cube",icon:"回",blurb:"swipe rows & columns back i
     const posOf=e=>{const r=cv.getBoundingClientRect();
       return [(e.clientX-r.left)/r.width*N|0,(e.clientY-r.top)/r.height*N|0,e.clientX,e.clientY];};
     cv.onpointerdown=e=>{e.preventDefault();
-      cv.setPointerCapture(e.pointerId);start=posOf(e);};
+      try{cv.setPointerCapture(e.pointerId);}catch(_){}
+      start=posOf(e);};
     cv.onpointermove=e=>{
       if(!start||!movable)return;
       const dx=e.clientX-start[2],dy=e.clientY-start[3];
@@ -1792,7 +2076,8 @@ const gameWrite={title:"Writing practice",icon:"筆",blurb:"stroke order · trac
         if(cur&&drawId!=null){strokes.pop();cur=null;redraw();}
         drawId=null;}
       if(drawId!=null)return;
-      drawId=e.pointerId;padC.setPointerCapture(e.pointerId);
+      drawId=e.pointerId;
+      try{padC.setPointerCapture(e.pointerId);}catch(_){}
       cur=[pt(e)];strokes.push(cur);};
     padC.onpointermove=e=>{
       if(!cur||e.pointerId!==drawId)return;
@@ -1858,6 +2143,11 @@ window.addEventListener("visibilitychange",()=>{
     if(c)cfg=Object.assign({},DEFAULT_CFG,c,
       {games:Object.assign({},DEFAULT_CFG.games,(c.games||{})),
        gsize:Object.assign({},DEFAULT_CFG.gsize,(c.gsize||{}))});
+    if(!cfg._m0810){          // one-time migration for pre-2026-08-10 configs
+      cfg.furigana=false;     // furigana is now off by default, everywhere
+      cfg.recordSpeak=true;   // bring back voice recording + replay
+      cfg._m0810=true;kvSet("cfg",cfg);}
+    migrateSchedule();
   }catch(e){console.warn("boot",e);}
   console.log("kanji-practice build",BUILD);
   render();})();
